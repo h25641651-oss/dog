@@ -1,0 +1,1069 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no" />
+  <title>Dancedog</title>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --ink:#000;
+      --paper:#f5f5dc;
+      --ui:#fff;
+      --shadow:#000;
+      --muted:rgba(255,255,255,.65);
+    }
+    html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;touch-action:none;user-select:none}
+    #wrap{position:relative;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center}
+    canvas{width:100vw;height:100vh;object-fit:contain;image-rendering:pixelated;display:block}
+    #ui-plane{
+      position:absolute; z-index:10; pointer-events:none;
+      padding:12px; box-sizing:border-box;
+      display:flex; flex-direction:column; gap:10px;
+      font-family:'Press Start 2P', monospace;
+      color:#fff; text-shadow:2px 2px 0 #000;
+    }
+    #title{font-size:24px; margin:0; line-height:1;}
+    #subtitle{
+      font-size:12px; line-height:1.35;
+      display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+      min-height:34px;
+    }
+    /* slightly smaller subtitle icons */
+    #subtitle img{width:14px;height:14px;image-rendering:pixelated}
+
+    #status{
+      position:absolute; left:10px; bottom:10px; z-index:50;
+      font-family:monospace; font-size:10px;
+      color:rgba(255,255,255,.55);
+      pointer-events:none;
+    }
+
+    /* Panels */
+    .panel{
+      position:absolute; z-index:40; display:none; flex-direction:column;
+      background:var(--paper); color:var(--ink); outline:6px solid var(--ink);
+      font-family:'Press Start 2P', monospace;
+      box-sizing:border-box;
+      padding:10px;
+      pointer-events:auto;
+    }
+    .panel h2{margin:0 0 10px 0; font-size:22px; text-align:center; text-decoration:underline;}
+    .panel p{margin:6px 0; font-size:12px; line-height:1.4;}
+    .panel .row{display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:10px;}
+    .btn{
+      font-family:'Press Start 2P', monospace;
+      font-size:18px;
+      padding:6px 10px; border:none; cursor:pointer;
+      background:var(--paper); color:var(--ink);
+      box-shadow:0 0 0 3px #000 inset;
+    }
+    .btn:active{transform:scale(.97)}
+    .btn[disabled]{opacity:.45; cursor:not-allowed}
+    .tiny{font-size:10px; opacity:.85}
+    .hr{height:2px; background:#000; opacity:.25; margin:8px 0;}
+    .pill{display:inline-block; padding:4px 6px; border:2px solid #000; background:#fff; font-size:10px}
+  </style>
+</head>
+
+<body>
+<div id="wrap">
+  <canvas id="cv" width="65" height="142"></canvas>
+
+  <div id="ui-plane">
+    <h1 id="title">Dancedog</h1>
+    <div id="subtitle"></div>
+  </div>
+
+  <!-- END PANEL -->
+  <div class="panel" id="end-panel">
+    <h2 id="end-title">Hoof wins!</h2>
+    <div class="row">
+      <button class="btn" id="btn-back">Back</button>
+      <button class="btn" id="btn-restart">Restart</button>
+    </div>
+  </div>
+
+  <div id="status">Loading…</div>
+</div>
+
+<script>
+(() => {
+  // ============================================================
+  // DOM
+  // ============================================================
+  const canvas = document.getElementById("cv");
+  const ctx = canvas.getContext("2d");
+
+  const uiPlane = document.getElementById("ui-plane");
+  const subtitle = document.getElementById("subtitle");
+  const statusEl = document.getElementById("status");
+
+  const endPanel = document.getElementById("end-panel");
+  const endTitle = document.getElementById("end-title");
+  const btnBack = document.getElementById("btn-back");
+  const btnRestart = document.getElementById("btn-restart");
+
+  // ============================================================
+  // Audio (mobile-safe synth + hooks)
+  // ============================================================
+  let audioCtx = null;
+  let audioUnlocked = false;
+
+  function ensureAudio() {
+    if (audioUnlocked) return;
+    try{
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      audioUnlocked = true;
+    }catch(e){ audioUnlocked = false; }
+  }
+  function beep({freq=440, dur=0.06, type="square", gain=0.045} = {}) {
+    if (!audioUnlocked || !audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(gain, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g);
+    g.connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.03);
+  }
+  const SFX = {
+    tap(){ beep({freq:880, dur:0.03, type:"square", gain:0.03}); },
+    hand(){ beep({freq:640, dur:0.05, type:"square", gain:0.055}); },
+    foot(){ beep({freq:220, dur:0.06, type:"square", gain:0.06}); },
+    invalid(){ beep({freq:120, dur:0.09, type:"sawtooth", gain:0.03}); },
+    win(){
+      beep({freq:523.25, dur:0.07, type:"square", gain:0.055});
+      setTimeout(()=>beep({freq:659.25, dur:0.07, type:"square", gain:0.055}), 90);
+      setTimeout(()=>beep({freq:783.99, dur:0.10, type:"square", gain:0.055}), 180);
+    }
+  };
+  window.addEventListener("pointerdown", ensureAudio, {once:true});
+
+  // ============================================================
+  // Haptics (mobile)
+  // ============================================================
+  function haptic(ms=8){
+    try{ if (navigator.vibrate) navigator.vibrate(ms); }catch(_){}
+  }
+
+  // ============================================================
+  // Assets
+  // ============================================================
+  const baseUrl = "https://raw.githubusercontent.com/thegoldenfloret/Dancedog/main/";
+
+  // Only these two are local (same folder as the HTML)
+  const LOCAL_ONLY = new Set(["Whitehand.png","Whitehoof.png"]);
+
+  const ASSET_NAMES = [
+    ["bg","Example.png"],
+    ["tablet","Tablet.png"],
+    ["hand","Hand.png"],
+    ["hoof","Hoof.png"],
+    ["paw","Paw.png"],
+    ["spot","Spot.png"],
+    ["dance1","Dance1.png"],
+    ["dance2","Dance2.png"],
+    ["mice1","Mice1.png"],
+    ["mice2","Mice2.png"],
+    ["goatstep","Goatstep.png"],
+    ["dogstep","Dogstep.png"],
+    ["goatwin","Goatwin.png"],
+    ["dogwin","Dogwin.png"],
+
+    // Subtitle icons (LOCAL)
+    ["whitehand","Whitehand.png"],
+    ["whitehoof","Whitehoof.png"],
+  ];
+
+  const assets = {};
+  function loadImg(url){
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => resolve({ok:true, img});
+      img.onerror = () => resolve({ok:false, img});
+      img.src = url + (url.includes("?") ? "" : "?v=" + Date.now());
+    });
+  }
+  function canDraw(img){ return img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0; }
+
+  async function loadAll(){
+    let done = 0;
+    for (const [key, file] of ASSET_NAMES){
+      statusEl.textContent = `Loading… ${done}/${ASSET_NAMES.length}`;
+
+      const url = LOCAL_ONLY.has(file) ? file : (baseUrl + file);
+      const {ok, img} = await loadImg(url);
+
+      assets[key] = img;
+      done++;
+      if (!ok && key !== "spot") console.warn("Failed to load", file);
+    }
+    statusEl.textContent = `Loading… ${ASSET_NAMES.length}/${ASSET_NAMES.length}`;
+  }
+
+  // ============================================================
+  // Overlay anchor (HARD RULE)
+  // ============================================================
+  const OVERLAY_X = 0;
+  const OVERLAY_Y = 18;
+
+  // ============================================================
+  // Coordinates
+  // ============================================================
+  const handPositions = {
+    a: { x: 0,  y: 58 },
+    b: { x: 28, y: 58 },
+    c: { x: 55, y: 58 },
+    d: { x: 55, y: 85 },
+    e: { x: 55, y: 113 },
+    f: { x: 27, y: 113 },
+    g: { x: 0,  y: 113 },
+    h: { x: 0,  y: 85 }
+  };
+  const handOrder = ["a","b","c","d","e","f","g","h"];
+
+  const gridX = [11, 22, 33, 44];
+  const gridY = [69, 80, 91, 102];
+  const gridPos = {};
+  let gi = 1;
+  for (const y of gridY) for (const x of gridX) gridPos[gi++] = {x,y};
+
+  function rcFromSq(sq){
+    const r = Math.floor((sq-1)/4);
+    const c = (sq-1)%4;
+    return {r,c};
+  }
+  function sqFromRC(r,c){ return r*4 + c + 1; }
+
+  const dirVec = {
+    a: {dr:-1, dc:-1},
+    b: {dr:-1, dc: 0},
+    c: {dr:-1, dc: 1},
+    d: {dr: 0, dc: 1},
+    e: {dr: 1, dc: 1},
+    f: {dr: 1, dc: 0},
+    g: {dr: 1, dc:-1},
+    h: {dr: 0, dc:-1},
+  };
+
+  // ============================================================
+  // UI plane positioning (keep overlays aligned to the drawn canvas)
+  // ============================================================
+  function getCanvasActualRect(){
+    const rect = canvas.getBoundingClientRect();
+    const canvasAspect = canvas.width / canvas.height;
+    const screenAspect = rect.width / rect.height;
+
+    let actualW, actualH, actualLeft, actualTop;
+    if (screenAspect > canvasAspect) {
+      actualH = rect.height;
+      actualW = actualH * canvasAspect;
+      actualTop = rect.top;
+      actualLeft = rect.left + (rect.width - actualW) / 2;
+    } else {
+      actualW = rect.width;
+      actualH = actualW / canvasAspect;
+      actualLeft = rect.left;
+      actualTop = rect.top + (rect.height - actualH) / 2;
+    }
+    return {actualW, actualH, actualLeft, actualTop};
+  }
+
+  function syncUIRects(){
+    const {actualW, actualH, actualLeft, actualTop} = getCanvasActualRect();
+    uiPlane.style.width = Math.floor(actualW) + "px";
+    uiPlane.style.height = Math.floor(actualH) + "px";
+    uiPlane.style.left = Math.floor(actualLeft) + "px";
+    uiPlane.style.top = Math.floor(actualTop) + "px";
+
+    // End panel sized to tablet overlay area (bottom)
+    const tabletH = (assets.tablet && assets.tablet.naturalHeight) ? assets.tablet.naturalHeight : 0;
+    const bgH = (assets.bg && assets.bg.naturalHeight) ? assets.bg.naturalHeight : canvas.height;
+    const tabletRatio = bgH ? (tabletH / bgH) : 0.35;
+    const overlayH = actualH * tabletRatio;
+
+    function placePanel(panel){
+      panel.style.width  = Math.floor(actualW) + "px";
+      panel.style.height = Math.floor(overlayH) + "px";
+      panel.style.left   = Math.floor(actualLeft) + "px";
+      panel.style.top    = Math.floor(actualTop + (actualH - overlayH)) + "px";
+    }
+    placePanel(endPanel);
+  }
+  window.addEventListener("resize", syncUIRects);
+
+  // ============================================================
+  // Game state
+  // ============================================================
+  const Phase = { HAND:"hand", FEET:"feet", END:"end" };
+
+  // boots straight into play
+  let PLAYER = "hoof";
+  let BOT = "paw";
+  let startingSide = "hoof"; // hoof begins new game
+  let turnSide = "hoof";
+  let phase = Phase.HAND;
+  let feetToMove = 2;
+  let moveLock = false;
+  let gameOver = false;
+
+  let danceToggle = 0;
+  let miceFrame = 0;
+  let miceTimer = null;
+
+  // Step overlay is temporary (flash on/off)
+  let stepOverlayActive = false;
+  let stepOverlaySide = null;
+  let stepOverlayUntil = 0;
+
+  // centerOverlay: "dance" | "goatwin" | "dogwin"
+  let centerOverlay = "dance";
+
+  let hands = [{id:"H1", pos:"h"},{id:"H2", pos:"d"}];
+  let feet = { hoof:[14,15], paw:[2,3] };
+
+  const drag = {
+    active:false,
+    type:null, // "hand"|"foot"
+    which:null,
+    side:null,
+    start:{x:0,y:0},
+    now:{x:0,y:0},
+    offset:{dx:0,dy:0},
+    legalTargets:[],
+    previewHandNext:null,
+  };
+
+  let noMoveToken = 0;
+  let winDelayToken = 0;
+
+  // ============================================================
+  // Helpers
+  // ============================================================
+  const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+  const opposite = (s) => (s === "hoof" ? "paw" : "hoof");
+
+  function isVacantSquare(sq){
+    return !feet.hoof.includes(sq) && !feet.paw.includes(sq);
+  }
+  function handNeighbors(pos){
+    const i = handOrder.indexOf(pos);
+    const cw  = handOrder[(i+1) % handOrder.length];
+    const ccw = handOrder[(i-1+handOrder.length) % handOrder.length];
+    return {cw, ccw};
+  }
+  function legalMovesForFoot(side, footIndex){
+    const occupied = new Set(hands.map(h => h.pos));
+    const fromSq = feet[side][footIndex];
+    const {r,c} = rcFromSq(fromSq);
+    const targets = [];
+    for (const letter of occupied){
+      const v = dirVec[letter];
+      const nr = r + v.dr;
+      const nc = c + v.dc;
+      if (nr < 0 || nr > 3 || nc < 0 || nc > 3) continue;
+      const nsq = sqFromRC(nr, nc);
+      if (isVacantSquare(nsq)) targets.push(nsq);
+    }
+    return Array.from(new Set(targets));
+  }
+  function sideHasAnyFootMove(side){
+    return legalMovesForFoot(side,0).length > 0 || legalMovesForFoot(side,1).length > 0;
+  }
+  function canPlayerAct(){
+    if (gameOver) return false;
+    if (moveLock) return false;
+    if (turnSide !== PLAYER) return false;
+    return true;
+  }
+
+  // ============================================================
+  // Subtitle icons (icon appears AFTER text)
+  // ============================================================
+  function iconHTML(imgObj, alt){
+    const src = imgObj?.src || "";
+    if (!src) return "";
+    return ` <img src="${src}" alt="${alt}">`;
+  }
+
+  function updateSubtitle(){
+    if (gameOver) { subtitle.innerHTML = ""; return; }
+    if (turnSide !== PLAYER) { subtitle.textContent = "Opponent is thinking..."; return; }
+
+    if (phase === Phase.HAND){
+      subtitle.innerHTML = `Your turn. Move a hand${iconHTML(assets.whitehand, "hand")}`;
+    } else if (phase === Phase.FEET){
+      subtitle.innerHTML = `Your turn. Move your feet${iconHTML(assets.whitehoof, "hoof")}`;
+    } else {
+      subtitle.innerHTML = "";
+    }
+  }
+
+  // ============================================================
+  // Mice clap control
+  // ============================================================
+  function setMiceClapSpeed(ms){
+    if (miceTimer) { clearInterval(miceTimer); miceTimer = null; }
+    if (ms <= 0) return;
+    miceTimer = setInterval(() => { miceFrame = (miceFrame + 1) % 2; }, ms);
+  }
+
+  // ============================================================
+  // Trap priority win check + 2s pause on winning move
+  // ============================================================
+async function checkTrapPriorityWin(moverSide){
+  if (gameOver) return true;
+  const opp = opposite(moverSide);
+
+  if (!sideHasAnyFootMove(opp)){
+    const token = ++winDelayToken;
+    moveLock = true;
+
+    clearDrag(); // 🔴 IMPORTANT: cancel any active drag
+
+    // 🔴 SHOW WINNER ART DURING FREEZE
+    centerOverlay = (moverSide === "hoof") ? "goatwin" : "dogwin";
+    updateSubtitle();
+
+    await sleep(9000);
+    if (token !== winDelayToken) return true;
+
+    if (!gameOver) showEnd(moverSide);
+    return true;
+  }
+  return false;
+}
+
+
+  // ============================================================
+  // Start/reset
+  // ============================================================
+  function resetBoard(){
+    hands = [{id:"H1", pos:"h"},{id:"H2", pos:"d"}];
+    feet = { hoof:[14,15], paw:[2,3] };
+
+    phase = Phase.HAND;
+    feetToMove = 2;
+    turnSide = startingSide;
+
+    moveLock = false;
+    gameOver = false;
+
+    danceToggle = 0;
+    stepOverlayActive = false;
+    stepOverlaySide = null;
+    stepOverlayUntil = 0;
+    centerOverlay = "dance";
+
+    drag.active = false;
+    drag.type = null;
+    drag.legalTargets = [];
+    drag.previewHandNext = null;
+
+    endPanel.style.display = "none";
+    noMoveToken++;
+    winDelayToken++;
+
+    updateSubtitle();
+    setMiceClapSpeed(500);
+
+    if (turnSide === BOT) runBotTurn().catch(console.error);
+  }
+
+  function showEnd(winnerSide){
+    gameOver = true;
+    phase = Phase.END;
+    moveLock = true;
+    noMoveToken++;
+    winDelayToken++;
+
+    if (winnerSide === "hoof"){
+      endTitle.textContent = "Hoof wins!";
+      centerOverlay = "goatwin";
+    } else {
+      endTitle.textContent = "Paw wins!";
+      centerOverlay = "dogwin";
+    }
+
+    endPanel.style.display = "flex";
+    updateSubtitle();
+
+    // mice clap faster on win
+    setMiceClapSpeed(150);
+
+    ensureAudio();
+    SFX.win();
+    haptic(30);
+  }
+
+  // Back → return to a new game with the starting side swapped
+  btnBack.addEventListener("click", () => {
+    ensureAudio(); SFX.tap(); haptic(10);
+    endPanel.style.display = "none";
+    startingSide = opposite(startingSide);
+    resetBoard();
+  });
+
+  // Restart → start a new game with Hoof starting
+  btnRestart.addEventListener("click", () => {
+    ensureAudio(); SFX.tap(); haptic(10);
+    endPanel.style.display = "none";
+    startingSide = "hoof";
+    resetBoard();
+  });
+
+  // ============================================================
+  // Pointer mapping + hit tests
+  // ============================================================
+  function pointerToCanvasXY(clientX, clientY){
+    const {actualW, actualH, actualLeft, actualTop} = getCanvasActualRect();
+    const nx = (clientX - actualLeft) / actualW;
+    const ny = (clientY - actualTop) / actualH;
+    return { x: nx * canvas.width, y: ny * canvas.height };
+  }
+
+  function hitTestHand(x,y){
+    const img = assets.hand;
+    const w = (img && img.naturalWidth) ? img.naturalWidth : 10;
+    const h = (img && img.naturalHeight) ? img.naturalHeight : 10;
+    for (let i=0;i<hands.length;i++){
+      const p = handPositions[hands[i].pos];
+      if (x >= p.x && x <= p.x + w && y >= p.y && y <= p.y + h) return {handIndex:i};
+    }
+    return null;
+  }
+
+  function hitTestFoot(x,y){
+    for (const side of ["hoof","paw"]){
+      const img = (side === "hoof") ? assets.hoof : assets.paw;
+      const w = (img && img.naturalWidth) ? img.naturalWidth : 10;
+      const h = (img && img.naturalHeight) ? img.naturalHeight : 10;
+      for (let i=0;i<2;i++){
+        const sq = feet[side][i];
+        const p = gridPos[sq];
+        if (x >= p.x && x <= p.x + w && y >= p.y && y <= p.y + h) return {side, footIndex:i};
+      }
+    }
+    return null;
+  }
+
+  // ============================================================
+  // Drag begin/update/commit
+  // ============================================================
+  function beginDragHand(handIndex, cx, cy){
+    const cur = hands[handIndex].pos;
+    const p = handPositions[cur];
+    const img = assets.hand;
+    const w = (img && img.naturalWidth) ? img.naturalWidth : 10;
+    const h = (img && img.naturalHeight) ? img.naturalHeight : 10;
+
+    drag.active = true;
+    drag.type = "hand";
+    drag.which = handIndex;
+    drag.side = null;
+    drag.start = {x:cx, y:cy};
+    drag.now = {x:cx, y:cy};
+    drag.offset = {dx:(p.x + w/2) - cx, dy:(p.y + h/2) - cy};
+    drag.previewHandNext = null;
+  }
+
+  function beginDragFoot(side, footIndex, cx, cy){
+    const sq0 = feet[side][footIndex];
+    const p0 = gridPos[sq0];
+    const img = (side === "hoof") ? assets.hoof : assets.paw;
+    const w = (img && img.naturalWidth) ? img.naturalWidth : 10;
+    const h = (img && img.naturalHeight) ? img.naturalHeight : 10;
+
+    drag.active = true;
+    drag.type = "foot";
+    drag.which = footIndex;
+    drag.side = side;
+    drag.start = {x:cx, y:cy};
+    drag.now = {x:cx, y:cy};
+    drag.offset = {dx:(p0.x + w/2) - cx, dy:(p0.y + h/2) - cy};
+    drag.legalTargets = legalMovesForFoot(side, footIndex);
+  }
+
+  function updateDrag(cx, cy){
+    drag.now = {x:cx, y:cy};
+    if (drag.type === "hand"){
+      const cur = hands[drag.which].pos;
+      const {cw, ccw} = handNeighbors(cur);
+      const pCw = handPositions[cw];
+      const pCcw = handPositions[ccw];
+      const dCw = Math.hypot(cx - (pCw.x+5), cy - (pCw.y+5));
+      const dCcw = Math.hypot(cx - (pCcw.x+5), cy - (pCcw.y+5));
+      drag.previewHandNext = (dCw < dCcw) ? cw : ccw;
+    }
+  }
+
+  function clearDrag(){
+    drag.active = false;
+    drag.type = null;
+    drag.which = null;
+    drag.side = null;
+    drag.legalTargets = [];
+    drag.previewHandNext = null;
+  }
+
+  function flashStep(side){
+    stepOverlayActive = true;
+    stepOverlaySide = side;
+    stepOverlayUntil = performance.now() + 180; // flash duration
+  }
+
+  async function commitHand(){
+    if (phase !== Phase.HAND) { ensureAudio(); SFX.invalid(); clearDrag(); return; }
+
+    const dx = drag.now.x - drag.start.x;
+    const dy = drag.now.y - drag.start.y;
+    if (Math.hypot(dx,dy) < 6) { clearDrag(); return; }
+
+    const cur = hands[drag.which].pos;
+    const {cw, ccw} = handNeighbors(cur);
+    const next = drag.previewHandNext || cw;
+    if (next !== cw && next !== ccw) { clearDrag(); return; }
+
+    hands[drag.which].pos = next;
+    danceToggle = (danceToggle + 1) % 2;
+
+    ensureAudio(); SFX.hand(); haptic(10);
+
+    // trap priority win (with 2s pause)
+    if (await checkTrapPriorityWin(turnSide)) { clearDrag(); return; }
+
+    phase = Phase.FEET;
+    feetToMove = 2;
+
+    clearDrag();
+    updateSubtitle();
+
+    await checkNoMovesLoss(turnSide);
+  }
+
+  async function commitFoot(){
+    if (phase !== Phase.FEET) { ensureAudio(); SFX.invalid(); clearDrag(); return; }
+
+    const targets = drag.legalTargets || [];
+    if (targets.length === 0) { ensureAudio(); SFX.invalid(); clearDrag(); return; }
+
+    const cx = drag.now.x, cy = drag.now.y;
+    let best = null, bestD = Infinity;
+    for (const sq of targets){
+      const p = gridPos[sq];
+      const d = Math.hypot(cx - (p.x+5), cy - (p.y+5));
+      if (d < bestD){ bestD = d; best = sq; }
+    }
+    if (best == null || bestD > 22) { ensureAudio(); SFX.invalid(); clearDrag(); return; }
+
+    feet[drag.side][drag.which] = best;
+    noMoveToken++; // 🔴 cancel pending "no foot moves" loss
+
+    ensureAudio(); SFX.foot(); haptic(12);
+
+    flashStep(drag.side);
+
+    // trap priority win (with 2s pause)
+    if (await checkTrapPriorityWin(turnSide)) { clearDrag(); return; }
+
+    feetToMove -= 1;
+    clearDrag();
+    updateSubtitle();
+
+if (feetToMove > 0){
+  return;
+}
+endTurnAndSwitch();
+
+
+  }
+
+  // ============================================================
+  // Pointer events
+  // ============================================================
+  canvas.addEventListener("pointerdown", (ev) => {
+    ensureAudio();
+    if (!canPlayerAct()) return;
+
+    const {x,y} = pointerToCanvasXY(ev.clientX, ev.clientY);
+
+    if (phase === Phase.HAND){
+      const hh = hitTestHand(x,y);
+      if (!hh) { SFX.invalid(); haptic(6); return; }
+      beginDragHand(hh.handIndex, x, y);
+      ev.preventDefault();
+      return;
+    }
+
+    if (phase === Phase.FEET){
+      const ff = hitTestFoot(x,y);
+      if (!ff) { SFX.invalid(); haptic(6); return; }
+      if (ff.side !== PLAYER) { SFX.invalid(); haptic(6); return; }
+      beginDragFoot(ff.side, ff.footIndex, x, y);
+      ev.preventDefault();
+      return;
+    }
+  }, {passive:false});
+
+  window.addEventListener("pointermove", (ev) => {
+    if (!drag.active) return;
+    const {x,y} = pointerToCanvasXY(ev.clientX, ev.clientY);
+    updateDrag(x,y);
+    ev.preventDefault();
+  }, {passive:false});
+
+  window.addEventListener("pointerup", async () => {
+    if (!drag.active) return;
+    if (!canPlayerAct()) { clearDrag(); return; }
+    if (drag.type === "hand") await commitHand();
+    else if (drag.type === "foot") await commitFoot();
+  }, {passive:false});
+
+  window.addEventListener("pointercancel", () => { if (drag.active) clearDrag(); });
+
+  // ============================================================
+  // No-move loss check (2s pause applies here too)
+  // ============================================================
+async function checkNoMovesLoss(sideToAct){
+  if (gameOver) return;
+  if (phase !== Phase.FEET) return;
+
+  // ✅ Only enforce the "trip" rule at the START of feet phase
+  if (feetToMove !== 2) return;
+
+  // If they have at least one move, no trip.
+  if (sideHasAnyFootMove(sideToAct)) return;
+
+  const token = ++noMoveToken;
+  moveLock = true;
+  updateSubtitle();
+
+  await sleep(2000); // use 2000 if you want 2 seconds
+  if (token !== noMoveToken) return;
+
+  // Re-check after delay
+  if (!gameOver && phase === Phase.FEET && turnSide === sideToAct && feetToMove === 2 && !sideHasAnyFootMove(sideToAct)){
+    showEnd(opposite(sideToAct));
+  } else {
+    moveLock = false;
+    updateSubtitle();
+  }
+}
+
+
+  // ============================================================
+  // Turn switching + bot
+  // ============================================================
+  function endTurnAndSwitch(){
+    if (gameOver) return;
+
+    noMoveToken++; // 🔴 importan
+
+    phase = Phase.HAND;
+    feetToMove = 2;
+
+    turnSide = opposite(turnSide);
+    updateSubtitle();
+
+    if (turnSide === BOT) runBotTurn().catch(console.error);
+  }
+
+  async function runBotTurn(){
+    if (gameOver) return;
+    moveLock = true;
+    updateSubtitle();
+
+    await sleep(900);
+    if (gameOver) return;
+
+    botMoveHandTrapAware(BOT);
+    danceToggle = (danceToggle + 1) % 2;
+    ensureAudio(); SFX.hand();
+
+    if (await checkTrapPriorityWin(BOT)) { return; }
+
+    phase = Phase.FEET;
+    feetToMove = 2;
+    updateSubtitle();
+
+    if (!sideHasAnyFootMove(BOT)){
+      moveLock = false;
+      await checkNoMovesLoss(BOT);
+      return;
+    }
+
+    await sleep(750);
+    if (gameOver) return;
+    botMoveOneFoot(BOT);
+    flashStep(BOT);
+
+    if (await checkTrapPriorityWin(BOT)) { return; }
+
+    if (!sideHasAnyFootMove(BOT)){
+      moveLock = false;
+      await checkNoMovesLoss(BOT);
+      return;
+    }
+
+    await sleep(750);
+    if (gameOver) return;
+    botMoveOneFoot(BOT);
+    flashStep(BOT);
+
+    if (await checkTrapPriorityWin(BOT)) { return; }
+
+    moveLock = false;
+    endTurnAndSwitch();
+  }
+
+  // ============================================================
+  // Stronger bot: mobility + deny forks (simple trap logic)
+  // ============================================================
+  function botMoveHandTrapAware(side){
+    const opp = opposite(side);
+
+    function mobility(sideX){
+      return legalMovesForFoot(sideX,0).length + legalMovesForFoot(sideX,1).length;
+    }
+    function oppMobAfterHandMove(){
+      return mobility(opp);
+    }
+    function simulateHandMove(hi, next){
+      const old = hands[hi].pos;
+      hands[hi].pos = next;
+      return () => { hands[hi].pos = old; };
+    }
+
+    function forkScoreForOpp(){
+      const set = new Set([...legalMovesForFoot(opp,0), ...legalMovesForFoot(opp,1)]);
+      return set.size;
+    }
+
+    let best = null;
+
+    for (let hi=0; hi<hands.length; hi++){
+      const cur = hands[hi].pos;
+      const {cw, ccw} = handNeighbors(cur);
+      for (const next of [cw, ccw]){
+        const undo = simulateHandMove(hi, next);
+
+        const myMob = mobility(side);
+        const theirMob = oppMobAfterHandMove();
+        const fork = forkScoreForOpp();
+
+        const score = (myMob * 3) - (theirMob * 2) - (fork * 1.5);
+
+        if (!best || score > best.score){
+          best = {hi, next, score};
+        }
+
+        undo();
+      }
+    }
+
+    if (best) hands[best.hi].pos = best.next;
+    else hands[0].pos = handNeighbors(hands[0].pos).cw;
+  }
+
+  function botMoveOneFoot(side){
+    const opp = opposite(side);
+
+    function distToOpp(sq){
+      const a = rcFromSq(sq);
+      let best = Infinity;
+      for (const b of feet[opp]){
+        const bb = rcFromSq(b);
+        best = Math.min(best, Math.abs(a.r-bb.r) + Math.abs(a.c-bb.c));
+      }
+      return best;
+    }
+
+    let best = null;
+    for (let fi=0; fi<2; fi++){
+      const from = feet[side][fi];
+      const moves = legalMovesForFoot(side, fi);
+      for (const to of moves){
+        feet[side][fi] = to;
+
+        const myMob = legalMovesForFoot(side,0).length + legalMovesForFoot(side,1).length;
+        const oppMob = legalMovesForFoot(opp,0).length + legalMovesForFoot(opp,1).length;
+        const dist = distToOpp(to);
+
+        const score = (myMob * 2) - (oppMob * 1) + (dist * 0.15);
+
+        if (!best || score > best.score) best = {fi, to, score};
+
+        feet[side][fi] = from;
+      }
+    }
+    if (!best) return;
+    feet[side][best.fi] = best.to;
+    ensureAudio(); SFX.foot();
+  }
+
+  // ============================================================
+  // Rendering
+  // ============================================================
+  function drawSpotAt(x,y){
+    if (canDraw(assets.spot)){
+      ctx.drawImage(assets.spot, x, y);
+    } else {
+      ctx.save();
+      ctx.globalAlpha = 0.45;
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(x, y, 8, 8);
+      ctx.restore();
+    }
+  }
+
+  function render(){
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // 1) Background
+    if (canDraw(assets.bg)) ctx.drawImage(assets.bg, 0, 0);
+
+    // 2) Tablet
+    const tabletY = canvas.height - (assets.tablet?.naturalHeight || 0);
+    if (canDraw(assets.tablet)) ctx.drawImage(assets.tablet, 0, tabletY);
+
+    // 3) Center base overlay (Dance OR Win) at EXACT anchor
+    let baseOverlayImg = null;
+    if (centerOverlay === "dance"){
+      baseOverlayImg = (danceToggle === 0) ? assets.dance1 : assets.dance2;
+    } else if (centerOverlay === "goatwin"){
+      baseOverlayImg = assets.goatwin;
+    } else if (centerOverlay === "dogwin"){
+      baseOverlayImg = assets.dogwin;
+    }
+    if (baseOverlayImg && canDraw(baseOverlayImg)){
+      ctx.drawImage(baseOverlayImg, OVERLAY_X, OVERLAY_Y);
+    }
+
+    // 4) Spots (foot legal squares)
+    if (drag.active && drag.type === "foot"){
+      for (const sq of drag.legalTargets){
+        const p = gridPos[sq];
+        drawSpotAt(p.x, p.y);
+      }
+    }
+
+    // 5) Hand direction spots during HAND phase (player only)
+    if (!gameOver && turnSide === PLAYER && phase === Phase.HAND){
+      for (let hi=0; hi<hands.length; hi++){
+        const cur = hands[hi].pos;
+        const {cw, ccw} = handNeighbors(cur);
+        const pCw = handPositions[cw];
+        const pCcw = handPositions[ccw];
+        drawSpotAt(pCw.x, pCw.y);
+        drawSpotAt(pCcw.x, pCcw.y);
+      }
+    }
+
+    // 6) Hands
+    if (canDraw(assets.hand)){
+      for (const h of hands){
+        const p = handPositions[h.pos];
+        ctx.drawImage(assets.hand, p.x, p.y);
+      }
+    }
+    // Dragging hand preview
+    if (drag.active && drag.type === "hand" && canDraw(assets.hand)){
+      const w = assets.hand.naturalWidth || 10;
+      const h = assets.hand.naturalHeight || 10;
+      const gx = drag.now.x + drag.offset.dx - w/2;
+      const gy = drag.now.y + drag.offset.dy - h/2;
+      ctx.drawImage(assets.hand, gx, gy);
+      if (drag.previewHandNext && handPositions[drag.previewHandNext]){
+        ctx.save();
+        ctx.globalAlpha = 0.55;
+        const pp = handPositions[drag.previewHandNext];
+        ctx.drawImage(assets.hand, pp.x, pp.y);
+        ctx.restore();
+      }
+    }
+
+    // 7) Feet
+    if (canDraw(assets.hoof)){
+      for (const sq of feet.hoof){
+        const p = gridPos[sq];
+        ctx.drawImage(assets.hoof, p.x, p.y);
+      }
+    }
+    if (canDraw(assets.paw)){
+      for (const sq of feet.paw){
+        const p = gridPos[sq];
+        ctx.drawImage(assets.paw, p.x, p.y);
+      }
+    }
+    if (drag.active && drag.type === "foot"){
+      const img = (drag.side === "hoof") ? assets.hoof : assets.paw;
+      if (canDraw(img)){
+        const w = img.naturalWidth || 10;
+        const h = img.naturalHeight || 10;
+        const gx = drag.now.x + drag.offset.dx - w/2;
+        const gy = drag.now.y + drag.offset.dy - h/2;
+        ctx.drawImage(img, gx, gy);
+      }
+    }
+
+    // 8) Step overlay (flash) — drawn ON TOP of base overlay at SAME anchor (same size)
+    if (stepOverlayActive && stepOverlaySide){
+      const now = performance.now();
+      if (now <= stepOverlayUntil){
+        const stepImg = (stepOverlaySide === "hoof") ? assets.goatstep : assets.dogstep;
+        if (canDraw(stepImg)) ctx.drawImage(stepImg, OVERLAY_X, OVERLAY_Y);
+      } else {
+        stepOverlayActive = false;
+        stepOverlaySide = null;
+      }
+    }
+
+    // 9) Mice — ALWAYS LAST — always at SAME anchor & size
+    const miceImg = (miceFrame === 0) ? assets.mice1 : assets.mice2;
+    if (canDraw(miceImg)) ctx.drawImage(miceImg, OVERLAY_X, OVERLAY_Y);
+  }
+
+  function rafLoop(){
+    render();
+    requestAnimationFrame(rafLoop);
+  }
+
+  // ============================================================
+  // Boot
+  // ============================================================
+  (async function boot(){
+    await loadAll();
+
+    // set internal canvas size to background size (original behavior)
+    if (canDraw(assets.bg)){
+      canvas.width = assets.bg.naturalWidth;
+      canvas.height = assets.bg.naturalHeight;
+    } else {
+      canvas.width = 65;
+      canvas.height = 142;
+    }
+
+    syncUIRects();
+    statusEl.textContent = "Ready";
+
+    startingSide = "hoof";
+    resetBoard();
+    setMiceClapSpeed(500);
+
+    requestAnimationFrame(rafLoop);
+  })();
+
+})();
+</script>
+</body>
+</html>
